@@ -1,0 +1,39 @@
+id: hass-backup-daily-sensor-statistics
+namespace: prod
+description: Daily backup of sensor statistics that have been recorded by home assistant to a mariadb database to google drive.
+
+triggers:
+  - id: schedule
+    type: io.kestra.core.models.triggers.types.Schedule
+    cron: "0 1 * * *"
+
+tasks:
+  - id: query-hass
+    type: "io.kestra.plugin.jdbc.mysql.Query"
+    url: jdbc:mysql://mysql.example.com:3306/homeassistant
+    username: [USERNAME]
+    password: [PASSWORD]
+    sql: |
+      SELECT TRUNCATE(sst.mean, 1) as mean, sst.max, sst.min, sm.statistic_id, DATE_FORMAT(FROM_UNIXTIME(sst.created_ts), '%Y-%m-%d %H:%i:%s') as created
+      FROM statistics_short_term sst
+      LEFT JOIN statistics_meta sm ON sst.metadata_id = sm.id
+      WHERE DATE(FROM_UNIXTIME(sst.created_ts)) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+        AND sst.mean IS NOT NULL
+      ORDER BY sm.statistic_id, FROM_UNIXTIME(sst.created_ts)
+    store: true
+
+  - id: write-to-csv
+    type: io.kestra.plugin.serdes.csv.CsvWriter
+    from: "{{outputs['query-hass'].uri}}"
+
+  - id: "upload"
+    type: "io.kestra.plugin.googleworkspace.drive.Upload"
+    from: "{{outputs['write-to-csv'].uri}}"
+    parents:
+    - "DIRECTORY_ID"
+    name: "{{ taskrun.startDate | dateAdd(-1, 'DAYS') | date('yyyy-MM-dd') }}.csv"
+    contentType: "text/csv"
+    mimeType: "application/vnd.google-apps.spreadsheet"
+  
+  - id: "purge-execution"
+    type: "io.kestra.core.tasks.storages.PurgeExecution"
